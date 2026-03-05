@@ -1,3 +1,5 @@
+from ast import Constant, Expression
+
 from fenics import *
 import dolfin
 import numpy as np
@@ -58,6 +60,16 @@ def NeoHookeanEnergy(q,InverseGrowthTensor,d = 3):
     n_rigid = int(d + d*(d-1)/2)
     for i in range(n_rigid): 
         w += (c[i]*inner(u,e[i]))
+    return w
+
+def UnconstrainedNeoHookeanEnergy(q,InverseGrowthTensor,d = 3):
+    u, p = split(q)
+    #inv_F_n = inv(Fn) #Inverse growth tensor
+    F = nabla_grad(u)+Identity(d) 
+    A = InverseGrowthTensor*F 
+    gramA = dot(A,A.T) 
+    w = tr(gramA)/2.0 + p*(det(F)-1.0)
+
     return w
   
 def PenaltyNeoHookeanEnergy(q,InverseGrowthTensor,d = 3,kpen=1e-3):
@@ -241,11 +253,108 @@ def minimizer(maxIter,tolObj,tolGrad,alphaInit,J,PDE,forwardJacobian,adjointPDE,
       iteration += 1
       return control.vector()[:], State.vector()[:],adjoint_state.vector()[:], residuals
 
+def create_nullspace(d,FunctionSpace):
+   
+  null_space = []
+
+  if d == 3:
+    e1 = Constant((1.0,0.0,0.0))
+    e2 = Constant((0.0,1.0,0.0))
+    e3 = Constant((0.0,0.0,1.0))
+    e4 = Expression(('-x[1]','x[0]',0.0), degree = 2)
+    e5 = Expression(('-x[2]',0.0,'x[0]'), degree = 2)
+    e6 = Expression((0.0,'-x[2]','x[1]'), degree = 2)
+    e = [e1,e2,e3,e4,e5,e6]
+  else:
+    e1 = Constant((1.0,0.0))
+    e2 = Constant((0.0,1.0))
+    e3 = Expression(('-x[1]','x[0]'), degree = 2)
+    e = [e1,e2,e3]
+    
+  for rigid_motion in e:
+      tx = interpolate(rigid_motion, FunctionSpace.sub(0).collapse())
+      mixed_tx = Function(FunctionSpace)
+      assign(mixed_tx.sub(0), tx)
+      null_space.append(mixed_tx.vector())
+  
+  #print(null_space)
+  return null_space
+
+    
 
 def PC(func,testfunc,dx):
   u, c, p = split(func)
   du, dc, dp = split(testfunc)
   return inner(nabla_grad(u)+nabla_grad(u).T,nabla_grad(du)+nabla_grad(du).T)*dx + inner(c,dc)*dx + p*dp*dx
+
+def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol):
+  error = 1
+  #tol = 1e-5
+  i = 0
+  max_iter = 100
+  u_i = Function(SolutionSpace)
+  u_i.vector()[:] = func.vector()[:]
+
+  J_i = replace(Jacobian,{func:u_i})
+  
+  update = Function(SolutionSpace)
+
+  F_i = replace(F,{func:u_i})
+
+  #P = assemble(M)
+  #print("Assembled P")
+  while error>tol and i < max_iter: 
+    #solve(J_i == F_i, update, 
+     #     solver_parameters={'linear_solver': 'mumps', 
+      #                    'preconditioner': 'ilu'}) #Compute update from tangent problem J(u,v) = F(u)
+
+    
+    A, b = assemble_system(J_i, F_i)
+    #P, _ = assemble_system(M, F_i)
+    #A = assemble(J_i)
+    #b = assemble(F_i)
+    
+    solver = PETScKrylovSolver("gmres","amg")
+    solver.parameters["maximum_iterations"] = 200
+    solver.set_operator(A)
+    nbasis = create_nullspace(d,SolutionSpace)
+    NullSpaceBasis = VectorSpaceBasis(nbasis)
+    #from IPython import embed; embed()
+    NullSpaceBasis.orthonormalize()
+    as_backend_type(A).set_nullspace(NullSpaceBasis)
+    NullSpaceBasis.orthogonalize(b)
+    solver.solve(update.vector(), b)
+    #print("Solved")
+    τ = τInit
+    u_i.vector()[:] = u_i.vector()[:] - τ*update.vector()[:] #Update Solution
+    error = sum(assemble(F_i) * assemble(F_i))
+    print('L2 Error: ', error)
+
+    
+    # CurrentError = sum(assemble(F_i) * assemble(F_i))
+    # lineSearchSuccessful = False
+    
+    # τ = τInit
+    # β = 0.5
+    # τMin = 1e-4
+    # σ = 0.1
+    # while (lineSearchSuccessful == False) and (τ  > τMin):
+    #   u_i.vector()[:] = u_i.vector()[:] - τ*update.vector()[:] #Update Solution
+    #   error = sum(assemble(F_i) * assemble(F_i))
+
+    #   if error < CurrentError - σ * τ * sum(update.vector() * update.vector()):
+    #     lineSearchSuccessful = True
+    #   else:
+    #     τ = β * τ
+    
+    # print('L2 Error, τ: ', error, τ)
+    #
+    #print(sum(update[:] * update[:]))
+    
+
+    i += 1
+  return u_i.vector()[:]
+  
 
 def NewtonSolver(u0,func,Jacobian,F,SolutionSpace,M,τ):
   error = 1
@@ -294,6 +403,7 @@ def NewtonSolver(u0,func,Jacobian,F,SolutionSpace,M,τ):
     
 
     i += 1
+    #return u_i.
   
 def IterativeNewtonSolver(u0,func,Jacobian,F,SolutionSpace,τ):
   error = 1
