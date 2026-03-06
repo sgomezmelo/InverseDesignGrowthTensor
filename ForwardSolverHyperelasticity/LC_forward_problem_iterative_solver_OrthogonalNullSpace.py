@@ -3,11 +3,11 @@ import dolfin
 import numpy as np
 from ufl_legacy import nabla_div, VectorElement, FiniteElement, MixedElement, split, replace, cos, sin
 import math 
-import meshio
+#import meshio
 import sys
 import os
 from funcsTensorCalc import *
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 
 #set_log_active(False)
 
@@ -72,14 +72,17 @@ nT = Expression(('cos(t)','sin(t)'), t = polarAngle,pi = np.pi, degree = 1)
 #nT = RadialConstantCurvature(K0, λT, 1/λT**(1/(d-1)))
 InverseGrowthTensor = (1/λT -λT**(1/(d-1)))*outer(nT,nT)+λT**(1/(d-1))*Identity(d)
 dE = derivative(UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)*dx,TargetState)
+energy = UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)
+assemble(energy * dx)
 J = derivative(dE,TargetState)
 #SolveNonLinearProblem(dE, TargetState, J,[],ffc_options, linear_solver = 'mumps',preconditioner = None,initial_relaxation = 0.5)
 #NewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,PC(TrialFunction(SolutionSpace),TestFunction(SolutionSpace),dx),1.0)
 #IterativeNewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,1)
 #print('Solved target problem')
-TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.1,d,1e-3)
-TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,1.0,d,1e-5)
-u_target, bla = split(TargetState)
+TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=50)
+print("finished first one")
+TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,1.,d,1e-5,energy)
+#u_target, bla = split(TargetState)
 #F_target = nabla_grad(u_target)+Identity(d)
 
 # uShow, mm, pp = TargetState.split()

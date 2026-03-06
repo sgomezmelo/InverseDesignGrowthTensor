@@ -287,32 +287,36 @@ def PC(func,testfunc,dx):
   du, dc, dp = split(testfunc)
   return inner(nabla_grad(u)+nabla_grad(u).T,nabla_grad(du)+nabla_grad(du).T)*dx + inner(c,dc)*dx + p*dp*dx
 
-def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol):
+def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol,energy,max_iter=100):
   error = 1
   #tol = 1e-5
   i = 0
-  max_iter = 100
   u_i = Function(SolutionSpace)
   u_i.vector()[:] = func.vector()[:]
 
   J_i = replace(Jacobian,{func:u_i})
+  energy = replace(energy, {func:u_i})
   
   update = Function(SolutionSpace)
+  tmp_step = Function(SolutionSpace)
+  derivative_func = Function(SolutionSpace)
 
   F_i = replace(F,{func:u_i})
 
   #P = assemble(M)
   #print("Assembled P")
+  τ = τInit
   while error>tol and i < max_iter: 
     #solve(J_i == F_i, update, 
      #     solver_parameters={'linear_solver': 'mumps', 
       #                    'preconditioner': 'ilu'}) #Compute update from tangent problem J(u,v) = F(u)
 
     
-    A, b = assemble_system(J_i, F_i)
-    #P, _ = assemble_system(M, F_i)
+    A, b = assemble_system(J_i, -F_i)
+    derivative_func.vector().set_local(-b.get_local()) # see line above for flipped sign reason
+    #P, _ = assemble_system(M, -F_i)
     #A = assemble(J_i)
-    #b = assemble(F_i)
+    #b = assemble(-F_i)
     
     solver = PETScKrylovSolver("gmres","amg")
     solver.parameters["maximum_iterations"] = 200
@@ -325,10 +329,36 @@ def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol):
     NullSpaceBasis.orthogonalize(b)
     solver.solve(update.vector(), b)
     #print("Solved")
-    τ = τInit
-    u_i.vector()[:] = u_i.vector()[:] - τ*update.vector()[:] #Update Solution
-    error = sum(assemble(F_i) * assemble(F_i))
-    print('L2 Error: ', error)
+    Armijosigma = 0.1
+    Armijobeta = 0.5
+    obj_now = assemble(energy*dx)
+    tmp_step.vector().set_local(u_i.vector().get_local()) # store current iterate
+    #expected_descent = assemble(inner(derivative_func,update) * dx)
+    expected_descent = update.vector().inner(-b)
+    # check angular condition
+    stepnorm = np.sqrt(assemble(inner(update,update) * dx))
+    stepnorm = np.sqrt(update.vector().inner(update.vector()))
+    #print("stepnorm = {0:3e}, expected_descent = {1:3e}".format(stepnorm,expected_descent))
+    if expected_descent>0:
+    #if -expected_descent <= np.minimum(1e-6,1e-6 * stepnorm**0.1) * stepnorm**2 or expected_descent>0:
+        update.vector().set_local(-derivative_func.vector().get_local())
+        #expected_descent = update.vector().inner(-b)
+        expected_descent = assemble(inner(derivative_func,update) * dx)
+        #τ = 2 * τ
+        print("using neg grad")
+        #pass
+    else:
+        τ = τInit
+        if i>=20:
+            τ = 1
+    while True: # reduce stepsize until Armijo condition is satisfied
+        # perform step
+        u_i.vector().set_local(tmp_step.vector().get_local() + τ*update.vector().get_local()) #Update Solution
+        if assemble(energy*dx) - obj_now < Armijosigma * τ * expected_descent or τ < 1e-4:
+            error = sum(assemble(F_i) * assemble(F_i))
+            print('L2 Error: {0:.3e}, alpha: {1}, descent = {2:.3e}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,τ,expected_descent,assemble(energy*dx),obj_now))
+            break
+        τ = Armijobeta * τ
 
     
     # CurrentError = sum(assemble(F_i) * assemble(F_i))
