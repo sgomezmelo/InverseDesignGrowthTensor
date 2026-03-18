@@ -1,7 +1,7 @@
 from fenics import *
 import dolfin
 import numpy as np
-from ufl_legacy import nabla_div, VectorElement, FiniteElement, MixedElement, split, replace, cos, sin
+from ufl import nabla_div, VectorElement, FiniteElement, MixedElement, split, replace, cos, sin
 import math 
 #import meshio
 import sys
@@ -50,8 +50,8 @@ n_sym = int(d*(d+1)/2)
 DisplacementElement = VectorElement("CG", mesh.ufl_cell(), 2) 
 LagrangeMultiplierCte = FiniteElement("Real", mesh.ufl_cell(), 0)
 PressureElement = FiniteElement("CG", mesh.ufl_cell(), 1) 
-#RigidMotions = MixedElement([LagrangeMultiplierCte for i in range(n_rigid)]) 
-mixed_element = MixedElement([DisplacementElement,PressureElement])
+RigidMotions = MixedElement([LagrangeMultiplierCte for i in range(n_rigid)]) 
+mixed_element = MixedElement([DisplacementElement,RigidMotions,PressureElement])
 #mixed_element = MixedElement([DisplacementElement,PressureElement])
 
 
@@ -71,17 +71,21 @@ nT = Expression(('cos(t)','sin(t)'), t = polarAngle,pi = np.pi, degree = 1)
 #nT = as_vector((1.0,0.0))
 #nT = RadialConstantCurvature(K0, λT, 1/λT**(1/(d-1)))
 InverseGrowthTensor = (1/λT -λT**(1/(d-1)))*outer(nT,nT)+λT**(1/(d-1))*Identity(d)
-dE = derivative(UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)*dx,TargetState)
-energy = UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)
+#dE = derivative(UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)*dx,TargetState)
+dE = derivative(NeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)*dx,TargetState)
+#energy,w_a,w_b = UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d,return_all=True)
+energy, w_b = NeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d,return_all=True)
+#print("constraint violation at the beginning = {}".format(assemble(w_b*dx)))
 assemble(energy * dx)
 J = derivative(dE,TargetState)
 #SolveNonLinearProblem(dE, TargetState, J,[],ffc_options, linear_solver = 'mumps',preconditioner = None,initial_relaxation = 0.5)
 #NewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,PC(TrialFunction(SolutionSpace),TestFunction(SolutionSpace),dx),1.0)
 #IterativeNewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,1)
 #print('Solved target problem')
-TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=50)
+#TargetState.vector()[:],ksp = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=100,constraint_term=w_b)
+#TargetState.vector()[:],ksp = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=100,constraint_term=w_b)
 print("finished first one")
-TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,1.,d,1e-5,energy)
+#TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,1.,d,1e-5,energy)
 #u_target, bla = split(TargetState)
 #F_target = nabla_grad(u_target)+Identity(d)
 

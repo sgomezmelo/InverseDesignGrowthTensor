@@ -1,11 +1,11 @@
-from ast import Constant, Expression
+from ast import Constant, Expression, expr_context
 
 from fenics import *
 import dolfin
 import numpy as np
-from ufl_legacy import nabla_div, VectorElement, FiniteElement, MixedElement, split, replace
+from ufl import nabla_div, VectorElement, FiniteElement, MixedElement, split, replace
 import math 
-import meshio
+#import meshio
 import sys
 import os
 from dolfin import PETScOptions
@@ -33,7 +33,7 @@ def assemble_sym_tensor(TensorComps,d,TensorInSurface=True):
     
     return T
 
-def NeoHookeanEnergy(q,InverseGrowthTensor,d = 3):
+def NeoHookeanEnergy(q,InverseGrowthTensor,d = 3,return_all=False):
     u, c, p = split(q)
     if d == 3:
       e1 = Constant((1.0,0.0,0.0))
@@ -60,16 +60,19 @@ def NeoHookeanEnergy(q,InverseGrowthTensor,d = 3):
     n_rigid = int(d + d*(d-1)/2)
     for i in range(n_rigid): 
         w += (c[i]*inner(u,e[i]))
+    if return_all:
+        return w, p*(det(F)-1.0)
     return w
 
-def UnconstrainedNeoHookeanEnergy(q,InverseGrowthTensor,d = 3):
+def UnconstrainedNeoHookeanEnergy(q,InverseGrowthTensor,d = 3,return_all=False):
     u, p = split(q)
     #inv_F_n = inv(Fn) #Inverse growth tensor
     F = nabla_grad(u)+Identity(d) 
     A = InverseGrowthTensor*F 
     gramA = dot(A,A.T) 
     w = tr(gramA)/2.0 + p*(det(F)-1.0)
-
+    if return_all:
+        return w,tr(gramA)/2.0 , p*(det(F)-1.0)
     return w
   
 def PenaltyNeoHookeanEnergy(q,InverseGrowthTensor,d = 3,kpen=1e-3):
@@ -287,7 +290,111 @@ def PC(func,testfunc,dx):
   du, dc, dp = split(testfunc)
   return inner(nabla_grad(u)+nabla_grad(u).T,nabla_grad(du)+nabla_grad(du).T)*dx + inner(c,dc)*dx + p*dp*dx
 
-def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol,energy,max_iter=100):
+def newton_from_scratch(energy,State,max_it=100,tau=1):
+    b_form = derivative(energy*dx,State,TestFunction(State.function_space()))
+    A_form = derivative(b_form,State,TrialFunction(State.function_space()))
+    for i in range(max_it):
+        b_matrix = assemble(-b_form)
+        A_matrix = assemble(A_form)
+        delta_state = Function(State.function_space())
+        solve(A_matrix,delta_state.vector(),b_matrix,'mumps')
+        State.vector().set_local(State.vector().get_local() + tau * delta_state.vector().get_local())
+        energy_val = assemble(energy*dx)
+        residual = np.linalg.norm(assemble(b_form))
+        print("i = {0}, energy = {1:.3e}, residual = {2:.3e}".format(i,energy_val,residual))
+    return
+
+def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,tauInit,d,tol,energy,max_iter=100,constraint_term=None):
+  error = 1
+  #tol = 1e-5
+  i = 0
+  u_i = Function(SolutionSpace)
+  u_i.vector()[:] = func.vector()[:]
+
+  J_i = replace(Jacobian,{func:u_i})
+  energy = replace(energy, {func:u_i})
+  if not constraint_term is None:
+    constraint_term = replace(constraint_term, {func:u_i})
+  
+  update = Function(SolutionSpace)
+  tmp_step = Function(SolutionSpace)
+  derivative_func = Function(SolutionSpace)
+
+  F_i = replace(F,{func:u_i})
+
+  #P = assemble(M)
+  #print("Assembled P")
+  tau = tauInit
+  while error>tol and i < max_iter: 
+    #solve(J_i == F_i, update, 
+     #     solver_parameters={'linear_solver': 'mumps', 
+      #                    'preconditioner': 'ilu'}) #Compute update from tangent problem J(u,v) = F(u)
+
+    
+    A, b = assemble_system(J_i, -F_i)
+    #P, _ = assemble_system(M, -F_i)
+    #A = assemble(J_i)
+    #b = assemble(-F_i)
+    
+    #solver = PETScKrylovSolver("gmres","none")
+    #solver.parameters["maximum_iterations"] = 2000
+    #solver.parameters["relative_tolerance"] = 0.1
+    solver = PETScLUSolver(as_backend_type(A),"mumps")
+    #solver.solve(A,b)
+    #solver.set_operator(A)
+    nbasis = create_nullspace(d,SolutionSpace)
+    NullSpaceBasis = VectorSpaceBasis(nbasis)
+    #from IPython import embed; embed()
+    NullSpaceBasis.orthonormalize()
+    as_backend_type(A).set_nullspace(NullSpaceBasis)
+    NullSpaceBasis.orthogonalize(b)
+    derivative_func.vector().set_local(-b.get_local()) # b is negative derivative as required in Newton's equation
+    solver.solve(update.vector(), b)
+    #print("Solved")
+    Armijosigma = 0.1
+    Armijobeta = 0.5
+    obj_now = assemble(energy*dx)
+    constraint_now = assemble(constraint_term*dx)
+    L2err_now = sum(assemble(F_i) * assemble(F_i))
+    tmp_step.vector().set_local(u_i.vector().get_local()) # store current iterate
+    #expected_descent = assemble(inner(derivative_func,update) * dx)
+    expected_descent = update.vector().inner(-b)
+    # check angular condition
+    stepnorm = np.sqrt(assemble(inner(update,update) * dx))
+    stepnorm = np.sqrt(update.vector().inner(update.vector()))
+    #print("stepnorm = {0:3e}, expected_descent = {1:3e}".format(stepnorm,expected_descent))
+    if True:
+    #if -expected_descent <= np.minimum(1e-6,1e-6 * stepnorm**0.1) * stepnorm**2 or expected_descent>0:
+        update.vector().set_local(-derivative_func.vector().get_local())
+        #expected_descent = update.vector().inner(-b)
+        expected_descent = assemble(inner(derivative_func,update) * dx)
+        expected_descent = -b.inner(update.vector())
+        tau = 2 * tau
+        print("using neg grad, descent = {:.3e}".format(expected_descent))
+        #pass
+    else:
+        tau = tauInit
+        tau = 1
+        #if i>=20:
+        #    tau = 1
+    while True: # reduce stepsize until Armijo condition is satisfied
+        # perform step
+        u_i.vector().set_local(tmp_step.vector().get_local() + tau*update.vector().get_local()) #Update Solution
+        L2err_new = sum(assemble(F_i) * assemble(F_i))
+        if assemble(energy*dx) - obj_now < Armijosigma * tau * expected_descent:# and L2err_new <= L2err_now:
+            #print('L2 Error: {0:.3e}, alpha: {1}, ksp.reason = {2}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,tau,solver.ksp().getConvergedReason(),expected_descent,assemble(energy*dx),obj_now))
+            print('L2 Error: {0:.3e}, alpha: {1}, descent = {2:.3e}, energy = {3:.3e}, obj_now = {4:.3e}, const = {5:.3e}'.format(L2err_new,tau,expected_descent,assemble(energy*dx),obj_now,constraint_now))
+            break
+        if tau < 1e-4:
+            #print('L2 Error: {0:.3e}, alpha: {1}, descent = {2:.3e}, energy = {3:.3e}, obj_now = {4:.3e}'.format(L2err_new,tau,expected_descent,assemble(energy*dx),obj_now))
+            #print('L2 Error: {0:.3e}, alpha: {1}, ksp.reason = {2}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,tau,ksp.getconvergedReason(),expected_descent,assemble(energy*dx),obj_now))
+            break
+        tau = Armijobeta * tau
+
+    i += 1
+  return u_i.vector()[:],solver.ksp()
+
+def check_gradient(func,Jacobian,F,SolutionSpace,tauInit,d,tol,energy,max_iter=100):
   error = 1
   #tol = 1e-5
   i = 0
@@ -305,7 +412,7 @@ def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol,energy,max
 
   #P = assemble(M)
   #print("Assembled P")
-  τ = τInit
+  tau = tauInit
   while error>tol and i < max_iter: 
     #solve(J_i == F_i, update, 
      #     solver_parameters={'linear_solver': 'mumps', 
@@ -318,7 +425,7 @@ def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol,energy,max
     #A = assemble(J_i)
     #b = assemble(-F_i)
     
-    solver = PETScKrylovSolver("gmres","amg")
+    solver = PETScKrylovSolver("gmres","ilu")
     solver.parameters["maximum_iterations"] = 200
     solver.set_operator(A)
     nbasis = create_nullspace(d,SolutionSpace)
@@ -344,21 +451,23 @@ def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,τInit,d,tol,energy,max
         update.vector().set_local(-derivative_func.vector().get_local())
         #expected_descent = update.vector().inner(-b)
         expected_descent = assemble(inner(derivative_func,update) * dx)
+        expected_descent = -b.inner(update.vector())
         #τ = 2 * τ
-        print("using neg grad")
+        print("using neg grad, descent = {:.3e}".format(expected_descent))
         #pass
     else:
-        τ = τInit
+        tau = tauInit
         if i>=20:
-            τ = 1
+            tau = 1
     while True: # reduce stepsize until Armijo condition is satisfied
         # perform step
-        u_i.vector().set_local(tmp_step.vector().get_local() + τ*update.vector().get_local()) #Update Solution
-        if assemble(energy*dx) - obj_now < Armijosigma * τ * expected_descent or τ < 1e-4:
+        u_i.vector().set_local(tmp_step.vector().get_local() + tau*update.vector().get_local()) #Update Solution
+        if assemble(energy*dx) - obj_now < Armijosigma * tau * expected_descent or τ < 1e-4:
             error = sum(assemble(F_i) * assemble(F_i))
-            print('L2 Error: {0:.3e}, alpha: {1}, descent = {2:.3e}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,τ,expected_descent,assemble(energy*dx),obj_now))
+            print('L2 Error: {0:.3e}, alpha: {1}, ksp.reason = {2}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,tau,ksp.getconvergedReason(),expected_descent,assemble(energy*dx),obj_now))
+            #print('L2 Error: {0:.3e}, alpha: {1}, descent = {2:.3e}, energy = {3:.3e}, obj_now = {4:.3e}'.format(error,tau,expected_descent,assemble(energy*dx),obj_now))
             break
-        τ = Armijobeta * τ
+        tau = Armijobeta * tau
 
     
     # CurrentError = sum(assemble(F_i) * assemble(F_i))
