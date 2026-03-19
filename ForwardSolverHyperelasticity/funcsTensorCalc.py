@@ -290,19 +290,61 @@ def PC(func,testfunc,dx):
   du, dc, dp = split(testfunc)
   return inner(nabla_grad(u)+nabla_grad(u).T,nabla_grad(du)+nabla_grad(du).T)*dx + inner(c,dc)*dx + p*dp*dx
 
-def newton_from_scratch(energy,State,max_it=100,tau=1):
-    b_form = derivative(energy*dx,State,TestFunction(State.function_space()))
-    A_form = derivative(b_form,State,TrialFunction(State.function_space()))
+def PC_up(func,testfunc,dx):
+  u, p = split(func)
+  du, dp = split(testfunc)
+  return inner(nabla_grad(u)+nabla_grad(u).T,nabla_grad(du)+nabla_grad(du).T)*dx + p*dp*dx
+
+def newton_from_scratch(energy,State,max_it=100,tau=1,do_mumps=False):
+
+    solver = KrylovSolver('cg', 'none')
+    delta_state = Function(State.function_space())
     for i in range(max_it):
+        b_form = derivative(energy*dx,State,TestFunction(State.function_space()))
+        A_form = derivative(b_form,State,TrialFunction(State.function_space()))
         b_matrix = assemble(-b_form)
         A_matrix = assemble(A_form)
-        delta_state = Function(State.function_space())
-        solve(A_matrix,delta_state.vector(),b_matrix,'mumps')
+        A_petsc = as_backend_type(A_matrix).mat()
+        delta_state.vector().zero()
+        if do_mumps:
+            solve(A_matrix,delta_state.vector(),b_matrix,'mumps')
+        else:
+            # set nullspace (rigid body motions) of the matrix A
+            nbasis = create_nullspace(2,State.function_space())
+            NullSpaceBasis = VectorSpaceBasis(nbasis)
+            NullSpaceBasis.orthonormalize()
+            #A_petsc.setNullSpace(NullSpaceBasis)
+            as_backend_type(A_matrix).set_nullspace(NullSpaceBasis)
+            NullSpaceBasis.orthogonalize(b_matrix)
+            ## init ksp problem
+            ksp = PETSc.KSP().create()
+            ksp.setType(PETSc.KSP.Type.GMRES)
+            PC_mat_fenics = assemble(PC_up(TestFunction(State.function_space()),TrialFunction(State.function_space()),dx))
+            as_backend_type(PC_mat_fenics).set_nullspace(NullSpaceBasis)
+            #ksp.setOperators(A_petsc,as_backend_type(PC_mat_fenics).mat())
+            ksp.setOperators(A_petsc)
+            pc = ksp.getPC()
+            pc.setType('lu')
+            ksp.setTolerances(rtol=1e-4,max_it=1000)
+            ksp.setFromOptions()
+            ksp.setUp()
+
+            ##ksp.setType("gmres")
+            ## solve newton system
+            ksp.solve(as_backend_type(b_matrix).vec(),as_backend_type(delta_state.vector()).vec(),)
+        ## perform update, adjust residuals and print status
         State.vector().set_local(State.vector().get_local() + tau * delta_state.vector().get_local())
         energy_val = assemble(energy*dx)
         residual = np.linalg.norm(assemble(b_form))
-        print("i = {0}, energy = {1:.3e}, residual = {2:.3e}".format(i,energy_val,residual))
-    return
+        stepsize = np.linalg.norm(delta_state.vector().get_local())
+        if do_mumps:
+            print("i = {0}, energy = {1:.3e}, residual = {2:.3e}, stepsize = {3:.3e}".format(i,energy_val,residual,stepsize))
+        else:
+            print("i = {0}, energy = {1:.3e}, residual = {2:.3e}, ksp.status = {3}, its = {4}, stepsize = {5:.3e}".format(i,energy_val,residual,ksp.getConvergedReason(),ksp.its,stepsize))
+    if do_mumps:
+        return
+    else:
+        return ksp
 
 def NewtonSolverwNullspace(func,Jacobian,F,SolutionSpace,tauInit,d,tol,energy,max_iter=100,constraint_term=None):
   error = 1
