@@ -279,6 +279,13 @@ def create_nullspace(d,FunctionSpace):
       mixed_tx = Function(FunctionSpace)
       assign(mixed_tx.sub(0), tx)
       null_space.append(mixed_tx.vector())
+
+  # do pressure
+  tx_pressure = interpolate(Constant(1.0),FunctionSpace.sub(1).collapse())
+  mixed_tx_pressure = Function(FunctionSpace)
+  assign(mixed_tx_pressure.sub(1),tx_pressure)
+  null_space.append(mixed_tx_pressure.vector())
+
   
   #print(null_space)
   return null_space
@@ -297,7 +304,6 @@ def PC_up(func,testfunc,dx):
 
 def newton_from_scratch(energy,State,max_it=100,tau=1,do_mumps=False):
 
-    solver = KrylovSolver('cg', 'none')
     delta_state = Function(State.function_space())
     for i in range(max_it):
         b_form = derivative(energy*dx,State,TestFunction(State.function_space()))
@@ -318,14 +324,15 @@ def newton_from_scratch(energy,State,max_it=100,tau=1,do_mumps=False):
             NullSpaceBasis.orthogonalize(b_matrix)
             ## init ksp problem
             ksp = PETSc.KSP().create()
+            ksp.setConvergenceHistory()
             ksp.setType(PETSc.KSP.Type.GMRES)
-            PC_mat_fenics = assemble(PC_up(TestFunction(State.function_space()),TrialFunction(State.function_space()),dx))
-            as_backend_type(PC_mat_fenics).set_nullspace(NullSpaceBasis)
+            #PC_mat_fenics = assemble(PC_up(TestFunction(State.function_space()),TrialFunction(State.function_space()),dx))
+            #as_backend_type(PC_mat_fenics).set_nullspace(NullSpaceBasis)
             #ksp.setOperators(A_petsc,as_backend_type(PC_mat_fenics).mat())
             ksp.setOperators(A_petsc)
             pc = ksp.getPC()
-            pc.setType('lu')
-            ksp.setTolerances(rtol=1e-4,max_it=1000)
+            pc.setType('none')
+            ksp.setTolerances(rtol=1e-2,max_it=30)
             ksp.setFromOptions()
             ksp.setUp()
 
