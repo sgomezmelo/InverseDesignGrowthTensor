@@ -145,7 +145,7 @@ def SolveNonLinearProblem(Variation, func, Jacobian,bc,ffc_options, linear_solve
                                             "relaxation_parameter":initial_relaxation,
                                             'maximum_iterations': 50, 
                                             "absolute_tolerance": 1.0e-3, 
-                                            "relative_tolerance": 1.0e-3}}) 
+                                            "relative_tolerance": 1.0e-3}})
     solve(Variation == 0,func,bc,J=Jacobian, form_compiler_parameters=ffc_options, 
       solver_parameters={"newton_solver":{"linear_solver":linear_solver, 
                                           "preconditioner":preconditioner,
@@ -290,6 +290,34 @@ def create_nullspace(d,FunctionSpace):
   #print(null_space)
   return null_space
 
+def create_rigidbodymotions(d,FunctionSpace):
+   
+  null_space = []
+
+  if d == 3:
+    e1 = Constant((1.0,0.0,0.0))
+    e2 = Constant((0.0,1.0,0.0))
+    e3 = Constant((0.0,0.0,1.0))
+    e4 = Expression(('-x[1]','x[0]',0.0), degree = 2)
+    e5 = Expression(('-x[2]',0.0,'x[0]'), degree = 2)
+    e6 = Expression((0.0,'-x[2]','x[1]'), degree = 2)
+    e = [e1,e2,e3,e4,e5,e6]
+  else:
+    e1 = Constant((1.0,0.0))
+    e2 = Constant((0.0,1.0))
+    e3 = Expression(('-x[1]','x[0]'), degree = 2)
+    e = [e1,e2,e3]
+    
+  for rigid_motion in e:
+      tx = interpolate(rigid_motion, FunctionSpace.sub(0).collapse())
+      mixed_tx = Function(FunctionSpace.sub(0).collapse())
+      assign(mixed_tx, tx)
+      null_space.append(as_backend_type(mixed_tx.vector()).vec())
+
+  
+  #print(null_space)
+  return null_space
+
     
 
 def PC(func,testfunc,dx):
@@ -311,6 +339,17 @@ def newton_from_scratch(energy,State,max_it=100,tau=1,do_mumps=False):
         b_matrix = assemble(-b_form)
         A_matrix = assemble(A_form)
         A_petsc = as_backend_type(A_matrix).mat()
+        # build fieldsplit preconditioner
+        dofs_u = State.function_space().sub(0).dofmap().dofs()
+        dofs_p = State.function_space().sub(1).dofmap().dofs()
+
+        rstart, rend = A_petsc.getOwnershipRange()
+
+        local_u = [i for i in dofs_u if rstart <= i < rend]
+        local_p = [i for i in dofs_p if rstart <= i < rend]
+
+        is_u = PETSc.IS().createGeneral(local_u, comm=PETSc.COMM_WORLD)
+        is_p = PETSc.IS().createGeneral(local_p, comm=PETSc.COMM_WORLD)
         delta_state.vector().zero()
         if do_mumps:
             solve(A_matrix,delta_state.vector(),b_matrix,'mumps')
@@ -331,11 +370,65 @@ def newton_from_scratch(energy,State,max_it=100,tau=1,do_mumps=False):
             #ksp.setOperators(A_petsc,as_backend_type(PC_mat_fenics).mat())
             ksp.setOperators(A_petsc)
             pc = ksp.getPC()
-            pc.setType('none')
-            ksp.setTolerances(rtol=1e-2,max_it=30)
-            ksp.setFromOptions()
-            ksp.setUp()
+            pc.setType(PETSc.PC.Type.FIELDSPLIT)
+            pc.setFieldSplitIS(("u", is_u), ("p", is_p))
+            pc.setFieldSplitType(PETSc.PC.CompositeType.SCHUR)
+            pc.setFieldSplitSchurFactType(PETSc.PC.SchurFactType.FULL)
+            # SELFP: PETSc builds S_A approximation from the (1,1) block it extracts 
+            # FULL: PETSc uses A^{-1} action inside S_A (more expensive, more exact) 
+            pc.setFieldSplitSchurPreType(PETSc.PC.SchurPreType.SELFP, None)
 
+            ksp.setOperators(A_petsc, A_petsc) 
+            ksp.setType("minres") # MINRES is natural for symmetric saddle-point ksp.setUp() 
+            # must call setUp() before getFieldSplitSubKSP() 
+            ksp.setTolerances(rtol=1e-2,max_it=50)
+            ksp.setFromOptions()
+            ksp.setMonitor(lambda ksp, it, rnorm: print(f"outer KSP it {it:4d} rnorm = {rnorm:.6e}"))
+            ksp.setUp()
+            sub_ksps = pc.getFieldSplitSubKSP() 
+            # sub_ksps[0] = velocity block KSP 
+            # sub_ksps[1] = Schur complement (pressure) KSP 
+            ksp_S = sub_ksps[1] # Build the null space for the pressure (e.g. constant pressure mode) 
+            p_const = Function(State.function_space().sub(1).collapse()) 
+            p_const.vector()[:] = 1.0 
+            as_backend_type(p_const.vector()).vec().normalize() 
+            ns_vec = as_backend_type(p_const.vector()).vec()
+            null_space_S = PETSc.NullSpace().create(constant=False, vectors=[ns_vec]) # Attach to the sub-KSP's operator — this is what actually matters 
+            ksp_S.getOperators()[0].setNullSpace(null_space_S) 
+            ksp_S.setMonitor(lambda ksp, it, rnorm: print(f"pressure KSP it {it:4d} rnorm = {rnorm:.6e}"))
+            ksp_S.setTolerances(rtol=1e-3,max_it=30)
+            ksp_S.setUp()
+            ###
+            ksp_u = sub_ksps[0] # Build the null space for the pressure (e.g. constant pressure mode) 
+            #RBM = Function(State.function_space().sub(1).collapse()) 
+            nullspace_rbm = create_rigidbodymotions(2,State.function_space())
+            null_space_rbm = PETSc.NullSpace().create(constant=False, vectors=nullspace_rbm) # Attach to the sub-KSP's operator — this is what actually matters 
+            #from IPython import embed; embed()
+            ksp_u.getOperators()[0].setNullSpace(null_space_rbm)
+            ksp_u.setTolerances(rtol=1e-3,max_it=30)
+            ksp_S.setUp()
+            #ksp_u.setMonitor(lambda ksp, it, rnorm: print(f"displacement KSP it {it:4d} rnorm = {rnorm:.6e}"))
+            ksp_u.setUp()
+            # also set on KSP for RHS projection
+            #pc.setType('none')
+
+            print("setup finished")
+
+            #subksps = pc.getFieldSplitSubKSP()
+            #ksp_u = subksps[0]
+            #ksp_p = subksps[1]
+
+            # Velocity block: AMG solve
+            #ksp_u.setType(PETSc.KSP.Type.PREONLY)
+            #pc_u = ksp_u.getPC()
+            #pc_u.setType(PETSc.PC.Type.HYPRE)
+
+            # Pressure Schur complement approximation
+            #ksp_p.setType(PETSc.KSP.Type.PREONLY)
+            #pc_p = ksp_p.getPC()
+            #pc_p.setType(PETSc.PC.Type.JACOBI)
+            ksp.setUp()
+            print("attempting solve")
             ##ksp.setType("gmres")
             ## solve newton system
             ksp.solve(as_backend_type(b_matrix).vec(),as_backend_type(delta_state.vector()).vec(),)

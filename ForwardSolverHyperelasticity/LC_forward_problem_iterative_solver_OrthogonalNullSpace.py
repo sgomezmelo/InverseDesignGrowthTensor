@@ -75,16 +75,23 @@ dE = derivative(UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d 
 #dE = derivative(NeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d)*dx,TargetState)
 energy,w_a,w_b = UnconstrainedNeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d,return_all=True)
 #energy, w_b = NeoHookeanEnergy(TargetState,InverseGrowthTensor,d = d,return_all=True)
-#print("constraint violation at the beginning = {}".format(assemble(w_b*dx)))
+
 assemble(energy * dx)
 J = derivative(dE,TargetState)
-#SolveNonLinearProblem(dE, TargetState, J,[],ffc_options, linear_solver = 'mumps',preconditioner = None,initial_relaxation = 0.5)
+#SolveNonLinearProblem(dE, TargetState, J,[],ffc_options, linear_solver = 'cg',preconditioner = None,initial_relaxation = 0.5)
+#solve(dE == 0,TargetState,[],J=J, form_compiler_parameters=ffc_options, 
+#      solver_parameters={"newton_solver":{"linear_solver":'cg',
+#                                          "preconditioner": "none",
+#                                            "relaxation_parameter":0.5,
+#                                            'maximum_iterations': 50, 
+#                                            "absolute_tolerance": 1.0e-3, 
+#                                            "relative_tolerance": 1.0e-3}})
 #NewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,PC(TrialFunction(SolutionSpace),TestFunction(SolutionSpace),dx),1.0)
 #IterativeNewtonSolver(TargetState,TargetState,J,dE,SolutionSpace,1)
 #print('Solved target problem')
 #TargetState.vector()[:],ksp = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=100,constraint_term=w_b)
 #TargetState.vector()[:],ksp = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,0.25,d,1e-5,energy,max_iter=100,constraint_term=w_b)
-print("finished first one")
+newton_from_scratch(energy, TargetState, tau=1., max_it=20,do_mumps=False)
 #TargetState.vector()[:] = NewtonSolverwNullspace(TargetState,J,dE,SolutionSpace,1.,d,1e-5,energy)
 #u_target, bla = split(TargetState)
 #F_target = nabla_grad(u_target)+Identity(d)
